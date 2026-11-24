@@ -1,0 +1,160 @@
+import json
+import os
+import random
+import discord
+from discord import app_commands
+
+POINTS_FILE = "points.json"
+
+
+def load_points() -> dict[str, int]:
+    if not os.path.exists(POINTS_FILE):
+        return {}
+    try:
+        with open(POINTS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return {str(k): int(v) for k, v in data.items()}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_points(data: dict[str, int]) -> None:
+    with open(POINTS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def add_points(user_id: int, amount: int) -> int:
+    points = load_points()
+    key = str(user_id)
+    points[key] = points.get(key, 0) + amount
+    save_points(points)
+    return points[key]
+
+
+def get_points(user_id: int) -> int:
+    return load_points().get(str(user_id), 0)
+
+
+intents = discord.Intents.default()
+
+
+class LynxBot(discord.Client):
+    def __init__(self):
+        super().__init__(intents=intents)
+        self.tree = app_commands.CommandTree(self)
+
+    async def setup_hook(self):
+        await self.tree.sync()
+
+
+client = LynxBot()
+
+
+@client.event
+async def on_ready():
+    print(f"بوت الألعاب {client.user} جاهز للعمل!")
+
+
+# --- اللعبة 1: حجر ورقة مقص (مع أزرار + نقاط) ---
+class RPSView(discord.ui.View):
+    def __init__(self, author_id: int):
+        super().__init__(timeout=30)
+        self.author_id = author_id
+
+    async def play(self, interaction: discord.Interaction, user_choice: str):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "هذه اللعبة لشخص آخر! اكتب `/rps` لتبدأ لعبتك.",
+                ephemeral=True,
+            )
+            return
+
+        choices = ["حجر", "ورقة", "مقص"]
+        bot_choice = random.choice(choices)
+        bonus_text = ""
+
+        if user_choice == bot_choice:
+            result = "تعادل! 🤝"
+        elif (
+            (user_choice == "حجر" and bot_choice == "مقص")
+            or (user_choice == "ورقة" and bot_choice == "حجر")
+            or (user_choice == "مقص" and bot_choice == "ورقة")
+        ):
+            new_total = add_points(interaction.user.id, 5)
+            result = "أنت فزت! 🎉"
+            bonus_text = f"\n⭐ ربحت **+5 نقاط** (رصيدك الآن: **{new_total}**)"
+        else:
+            result = "أنا فزت! 🤖"
+
+        for item in self.children:
+            item.disabled = True
+
+        await interaction.response.edit_message(
+            content=(
+                f"اختيارك: **{user_choice}** | اختياري: **{bot_choice}**\n"
+                f"**النتيجة:** {result}{bonus_text}"
+            ),
+            view=self,
+        )
+
+    @discord.ui.button(label="حجر 🪨", style=discord.ButtonStyle.primary)
+    async def rock(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.play(interaction, "حجر")
+
+    @discord.ui.button(label="ورقة 📄", style=discord.ButtonStyle.primary)
+    async def paper(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.play(interaction, "ورقة")
+
+    @discord.ui.button(label="مقص ✂️", style=discord.ButtonStyle.primary)
+    async def scissors(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.play(interaction, "مقص")
+
+
+@client.tree.command(name="rps", description="العب حجر ورقة مقص ضد البوت واربح نقاطاً")
+async def rps(interaction: discord.Interaction):
+    view = RPSView(author_id=interaction.user.id)
+    await interaction.response.send_message("اختر حركتك:", view=view)
+
+
+# --- اللعبة 2: تخمين الرقم (+ نقاط) ---
+@client.tree.command(name="guess", description="خمّن رقماً بين 1 و 10 واربح نقاطاً")
+@app_commands.describe(number="اكتب رقمك من 1 إلى 10")
+async def guess(interaction: discord.Interaction, number: app_commands.Range[int, 1, 10]):
+    secret = random.randint(1, 10)
+    if number == secret:
+        new_total = add_points(interaction.user.id, 5)
+        await interaction.response.send_message(
+            f"🎯 صحيح! الرقم كان **{secret}**. أحسنت!\n"
+            f"⭐ ربحت **+5 نقاط** (رصيدك الآن: **{new_total}**)"
+        )
+    else:
+        await interaction.response.send_message(
+            f"❌ خطأ! اخترت **{number}** والرقم الصحيح كان **{secret}**."
+        )
+
+
+# --- اللعبة 3: رمي النرد ---
+@client.tree.command(name="roll", description="ارمِ نرداً من 1 إلى 6")
+async def roll(interaction: discord.Interaction):
+    result = random.randint(1, 6)
+    await interaction.response.send_message(f"🎲 رميت النرد وظهر الرقم: **{result}**")
+
+
+# --- اللعبة 4: إكس-أو (XO) جماعية بين لاعبين ---
+WIN_LINES = [
+    (0, 1, 2),
+    (3, 4, 5),
+    (6, 7, 8),
+    (0, 3, 6),
+    (1, 4, 7),
+    (2, 5, 8),
+    (0, 4, 8),
+    (2, 4, 6),
+]
+
+
+def check_xo_winner(board: list[str | None]) -> str | None:
+    for a, b, c in WIN_LINES:
+        if board[a] and board[a] == board[b] and board[a] == board[c]:
+            return board[a]
+    if all(cell is not None for
